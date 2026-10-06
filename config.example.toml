@@ -1,0 +1,12 @@
+# Copy to %LOCALAPPDATA%\WhisperPauseBreak\config.toml. Restart after editing.
+# Relative model paths resolve against the configuration directory.
+model = "models/ggml-base.en.bin"
+language = "en"                 # "auto" requires a multilingual model
+backend = "auto"                # auto: try the bundled CUDA worker, then CPU
+hotkey = "Pause"                # Pause, ScrollLock, or F13 through F24
+threads = 8
+max_recording_seconds = 120     # reaching the limit CANCELS, never inserts a partial take
+min_recording_ms = 200
+silence_rms = 0.003             # lower for a quiet microphone; 0 disables the noise floor
+cue_volume = 0.10               # 0..0.5
+inference_timeout_seconds = 180

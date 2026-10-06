@@ -1,0 +1,3 @@
+[env]
+# Portable CPU binary; CUDA kernels are configured separately by the build script.
+GGML_NATIVE = "OFF"
