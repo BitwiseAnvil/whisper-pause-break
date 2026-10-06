@@ -18,6 +18,8 @@ pub struct Config {
     pub silence_rms: f32,
     pub cue_volume: f32,
     pub inference_timeout_seconds: u64,
+    /// Swallow Win+H so Windows voice typing cannot open while the app runs.
+    pub block_win_h: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -81,6 +83,7 @@ impl Default for Config {
             silence_rms: 0.003,
             cue_volume: 0.10,
             inference_timeout_seconds: 180,
+            block_win_h: false,
         }
     }
 }
@@ -167,6 +170,12 @@ pub fn data_dir(explicit: Option<PathBuf>) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn win_h_block_is_opt_in() {
+        assert!(!Config::default().block_win_h);
+        let c: Config = toml::from_str("block_win_h = true").unwrap();
+        assert!(c.block_win_h);
+    }
     #[test]
     fn reject_invalid_bounds() {
         let mut c = Config {

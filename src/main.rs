@@ -174,7 +174,7 @@ fn execute(cli: Cli) -> Result<()> {
                     println!("{:>6} ms: {event:?}", started.elapsed().as_millis());
                 }
             });
-            let result = platform::run(tx.clone(), app::Status::new(), dir, config.hotkey, true);
+            let result = platform::run(tx.clone(), app::Status::new(), dir, config.hotkey, config.block_win_h, true);
             app::send(&tx, app::Event::Quit);
             let _ = receiver.join();
             result
@@ -217,7 +217,7 @@ fn execute(cli: Cli) -> Result<()> {
                     controller_status,
                 )
             });
-            let result = platform::run(tx.clone(), status, dir, config.hotkey, false);
+            let result = platform::run(tx.clone(), status, dir, config.hotkey, config.block_win_h, false);
             app::send(&tx, app::Event::Quit);
             let _ = controller.join();
             result

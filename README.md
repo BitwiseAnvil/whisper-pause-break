@@ -108,7 +108,7 @@ For a larger CUDA model, [large-v3-turbo](https://huggingface.co/ggerganov/whisp
 
 The hotkey and cancellation Escape are consumed so they do not act on the focused application. Escape plays the cancellation cue once when it discards an active recording; subsequent Escape presses and releasing Pause do not play another cue or submit audio. Ordinary Escape passes through silently. Key-repeat cannot restart a cancelled recording. A second press while transcribing is ignored; wait for completion before the next take. No audio is queued for later insertion. Silence, very short taps, disconnected microphones, and recordings over the configured duration are discarded. Locking/suspending Windows discards active capture and suppresses pending results.
 
-While the background app is running, **Win+H is blocked** so Windows voice typing cannot be opened with that shortcut. Either Windows key works; held H repeats and its release are consumed. Plain H, other Windows shortcuts, and H shortcuts with extra Ctrl/Alt/Shift modifiers pass through. Quitting the app restores Win+H automatically. No Windows setting or separate remapping utility is required; diagnostic CLI commands do not enable the block.
+**Optional: block Win+H.** Off by default. Set `block_win_h = true` in `config.toml` and restart to stop Windows voice typing from opening with Win+H while the app runs. When enabled, either Windows key works; held H repeats and its release are consumed. Plain H, other Windows shortcuts, and H shortcuts with extra Ctrl/Alt/Shift modifiers pass through. Quitting the app restores Win+H automatically. No Windows setting or separate remapping utility is required; diagnostic CLI commands do not enable the block.
 
 Right/left-click the tray icon to see status, open configuration/logs, or quit. Only one instance can run in a Windows session. Configuration changes require a restart. Audio is kept in memory only; neither audio nor transcript contents are written to logs. The microphone stream stays open to minimize press latency, but samples outside an active recording are discarded immediately. Windows' microphone indicator may therefore stay on while idle.
 
@@ -134,7 +134,7 @@ Windows GUI executables do not always make PowerShell wait. To synchronously wai
 
 ## Design and verification
 
-- A minimal `WH_KEYBOARD_LL` hook runs on the tray message loop. It filters Win+H and sends control events; inference never blocks the hook. A dummy key pair masks Start-menu activation after a blocked Win+H without changing held modifiers.
+- A minimal `WH_KEYBOARD_LL` hook runs on the tray message loop. It sends control events and, when `block_win_h` is enabled, filters Win+H; inference never blocks the hook. A dummy key pair masks Start-menu activation after a blocked Win+H without changing held modifiers.
 - WASAPI audio via CPAL keeps capture/playback streams warm. Multichannel capture is downmixed and FFT-resampled to 16 kHz with anti-aliasing and delay compensation.
 - The pure state machine handles hold, release, repeat, busy presses, cancellation, and time limits.
 - A local anonymous pipe carries bounded PCM frames to one persistent Whisper worker. JSON responses are length-delimited and bounded. No network sockets or temporary WAV files are used.

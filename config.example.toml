@@ -10,3 +10,4 @@ min_recording_ms = 200
 silence_rms = 0.003             # lower for a quiet microphone; 0 disables the noise floor
 cue_volume = 0.10               # 0..0.5
 inference_timeout_seconds = 180
+block_win_h = false             # true blocks Win+H (Windows voice typing) while running

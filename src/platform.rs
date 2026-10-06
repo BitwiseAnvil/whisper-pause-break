@@ -38,6 +38,7 @@ struct Context {
     held: bool,
     escape: bool,
     voice_typing: VoiceTypingBlocker,
+    block_win_h: bool,
     diagnostic: bool,
     started: Instant,
     taskbar_created: u32,
@@ -62,7 +63,7 @@ unsafe extern "system" fn hook(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRE
         if !down && !up {
             return false;
         }
-        if !c.diagnostic && key.vkCode == u32::from(VK_H) {
+        if c.block_win_h && !c.diagnostic && key.vkCode == u32::from(VK_H) {
             // H's own async state is not updated yet, but previously delivered modifiers are.
             let modifiers = Modifiers {
                 windows: key_down(VK_LWIN) || key_down(VK_RWIN),
@@ -374,6 +375,7 @@ pub fn run(
     status: Status,
     dir: PathBuf,
     hotkey: Hotkey,
+    block_win_h: bool,
     diagnostic: bool,
 ) -> Result<()> {
     unsafe {
@@ -398,6 +400,7 @@ pub fn run(
                 held: false,
                 escape: false,
                 voice_typing: VoiceTypingBlocker::new(key_down(VK_H)),
+                block_win_h,
                 diagnostic,
                 started: Instant::now(),
                 taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
