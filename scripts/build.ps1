@@ -9,6 +9,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 Push-Location (Split-Path -Parent $PSScriptRoot)
+# vcvars appends to PATH; restore the caller's environment so repeated builds in one session work.
+$savedEnvironment = [Environment]::GetEnvironmentVariables('Process')
 try {
     $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
     if (!(Test-Path -LiteralPath $vswhere)) { throw 'Install Visual Studio Desktop development with C++ (MSVC and Windows SDK).' }
@@ -64,4 +66,12 @@ try {
         Copy-Item -LiteralPath 'README.md','LICENSE','config.example.toml' -Destination 'dist'
         Write-Host 'Release files are in dist/.'
     }
-} finally { Pop-Location }
+} finally {
+    foreach ($name in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
+        if (!$savedEnvironment.Contains($name)) { [Environment]::SetEnvironmentVariable($name, $null, 'Process') }
+    }
+    foreach ($entry in $savedEnvironment.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
+    }
+    Pop-Location
+}

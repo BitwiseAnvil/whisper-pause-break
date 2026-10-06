@@ -36,6 +36,48 @@ conversations with your AI coding tools.
 Written entirely in Rust for Windows 10/11 x64. The `whisper-rs` bindings build
 the upstream [whisper.cpp](https://github.com/ggml-org/whisper.cpp) library.
 
+## Install with Claude Code or Codex
+
+Let your AI assistant do the setup. It can clone the repo, build the app, walk
+you through the keyboard check, download the model and install it.
+
+**Install these yourself first.** They need administrator rights or your own
+sign-in:
+
+- Windows 10 or 11 x64 with an AVX2-capable CPU, a microphone, and a keyboard
+  whose Pause/Break key sends a real release event (the assistant will check; see
+  [Keyboard compatibility](#keyboard-compatibility--check-once)).
+- [Git](https://git-scm.com/) and [Rust](https://rustup.rs/) stable 1.89 or newer
+  with the MSVC toolchain.
+- [Visual Studio or Build Tools](https://visualstudio.microsoft.com/downloads/)
+  with the **Desktop development with C++** workload, including the Windows SDK
+  and CMake tools.
+- [LLVM](https://github.com/llvm/llvm-project/releases), which provides `libclang.dll`.
+- Optional, for GPU speed: an NVIDIA GPU, a current driver and the
+  [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads). Developed with CUDA 13.
+  Without them the app runs on the CPU.
+- [Claude Code](https://claude.com/claude-code) or
+  [Codex CLI](https://developers.openai.com/codex/cli), signed in.
+
+**Then** open a terminal in an empty folder, start `claude` or `codex`, and paste:
+
+```text
+Install Whisper Pause/Break from https://github.com/BitwiseAnvil/whisper-pause-break on this PC.
+Clone it into this folder, read its README and follow "Build" and "Install once". First check
+the prerequisites and tell me what's missing instead of installing system software yourself.
+Build the CPU host. If I have an NVIDIA GPU and the CUDA Toolkit, also build the CUDA worker.
+Before installing, run key-test and ask me to hold Pause/Break for two seconds and release.
+If Down and Up aren't about two seconds apart, stop and explain the README's options.
+Then download the model, install the app and confirm the log shows it is ready.
+```
+
+The assistant will ask before running commands; approve them as it goes. The
+first build compiles whisper.cpp and takes a few minutes. **Codex users:**
+Codex's sandbox blocks network access and changes outside the folder by default,
+and the build downloads crates and the installer writes to your profile.
+Approve Codex's requests to run those steps outside the sandbox. When it's
+finished, look for **Ready** in the tray menu, then hold Pause/Break and talk.
+
 ## Keyboard compatibility — check once
 
 Pause is unusual: some keyboards/drivers send no real release event, or synthesize a release immediately at key-down. **True hold-to-talk requires a real release event.** This app does not guess release from silence, a timer, or `GetAsyncKeyState`, and does not silently change the interaction to a toggle.
