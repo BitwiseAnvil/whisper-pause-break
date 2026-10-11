@@ -27,6 +27,12 @@ conversations with your AI coding tools.
   the take away.
 - **Audible cues.** Short ticks confirm start, stop, insertion and cancel, so
   you don't have to watch the screen.
+- **Gives your GPU back when idle.** Optionally unloads the model after a few idle
+  seconds. The next press records instantly and reloads the model while you
+  speak (about a second on an RTX 5090), so other GPU work gets the memory.
+- **Status at a glance.** The tray dot turns green while listening, blue while
+  transcribing and amber while loading; filled means the model is loaded, a ring
+  means it is unloaded.
 - **Set and forget.** Installs per user with no administrator rights, starts at
   login, and lives in the system tray.
 - **Private by design.** Audio stays in memory, and neither audio nor transcripts
@@ -135,7 +141,9 @@ The default data directory is `%LOCALAPPDATA%\WhisperPauseBreak`; executables go
 
 Already have an appropriate GGML Whisper model? Use `install --model C:\path\ggml-base.en.bin`. Keep `language = "en"` for English-only models. Use a multilingual model with another language code or `"auto"`. By default the model is loaded once and kept in memory. Set `idle_unload_seconds` (10..86400) to release it, including its GPU memory, after that many idle seconds. The next press starts recording immediately and reloads the model in parallel while you speak; the take is transcribed as soon as the model is ready. Quantized GGML models (for example `ggml-large-v3-turbo-q8_0.bin`) roughly halve memory use with little accuracy loss. `base.en` is the default latency/accuracy compromise; choose a larger model by editing the config if desired.
 
-For a larger CUDA model, [large-v3-turbo](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-large-v3-turbo.bin) has 809 million parameters and a 1.62 GB GGML file. Install a downloaded copy with `install --model C:\path\ggml-large-v3-turbo.bin`; keep `language = "en"` for English dictation. It uses more GPU memory than base.en. The verified SHA-256 for this file is `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69`. The download and model switch happen once; all subsequent transcription remains local.
+For a larger CUDA model, [large-v3-turbo](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-large-v3-turbo.bin) has 809 million parameters and a 1.62 GB GGML file. Install a downloaded copy with `install --model C:\path\ggml-large-v3-turbo.bin`; keep `language = "en"` for English dictation. It uses more GPU memory than base.en. The verified SHA-256 for this file is `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69`. The 8-bit [large-v3-turbo-q8_0](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-large-v3-turbo-q8_0.bin) (874 MB, SHA-256 `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1`) needs about half the GPU memory (874 MB versus 1.62 GB of model weights on CUDA) and transcribed the reference sample identically. The download and model switch happen once; all subsequent transcription remains local.
+
+A good setup for a shared GPU is the q8_0 model with `idle_unload_seconds = 30`: after 30 idle seconds the worker process exits and releases all of its GPU memory, and the next press reloads it while you are still speaking.
 
 `install --no-start` enables startup without launching immediately. To run portably, use `--data-dir C:\path\data run`; the same global option applies to all commands. Installation and the one-time model download are explicit, never performed during background startup.
 
@@ -179,12 +187,15 @@ Windows GUI executables do not always make PowerShell wait. To synchronously wai
 - A minimal `WH_KEYBOARD_LL` hook runs on the tray message loop. It sends control events and, when `block_win_h` is enabled, filters Win+H; inference never blocks the hook. A dummy key pair masks Start-menu activation after a blocked Win+H without changing held modifiers.
 - WASAPI audio via CPAL keeps capture/playback streams warm. Multichannel capture is downmixed and FFT-resampled to 16 kHz with anti-aliasing and delay compensation.
 - The pure state machine handles hold, release, repeat, busy presses, cancellation, and time limits.
-- A local anonymous pipe carries bounded PCM frames to one persistent Whisper worker. JSON responses are length-delimited and bounded. No network sockets or temporary WAV files are used.
-- A Windows job object kills the child when the host exits. CUDA initialization failures, native aborts, disconnects, and inference timeouts trigger CPU fallback. Failed GPU inference is retried once on CPU, before any text is inserted.
-- Whisper uses greedy decoding, no prior take context, no realtime text callbacks, no temperature retries, and optional flash attention on CUDA. It performs a warm-up at startup.
-- Unit tests cover cancellation/repeat/order, Win+H release order and preservation of other H shortcuts, audio length/gain and anti-aliasing, silence/cue rejection, bounded IPC, Unicode event pairs, normalization, configuration validation, and quoted startup commands.
+- A local anonymous pipe carries bounded PCM frames to one Whisper worker process. It stays loaded, or with `idle_unload_seconds` it exits when idle and is restarted on the next press. Load, transcribe and unload requests run strictly in order, so a take recorded during a reload waits for the model instead of failing, and the model is never unloaded while recording, loading or transcribing. A failed load is retried on the next press rather than requiring a restart. JSON responses are length-delimited and bounded. No network sockets or temporary WAV files are used.
+- A Windows job object kills the child when the host exits. CUDA initialization failures, native aborts, disconnects, and inference timeouts trigger CPU fallback. Failed GPU inference is retried once on CPU, before any text is inserted. With idle unload enabled, each reload tries CUDA again, so a transient GPU fault does not leave the app on CPU until restart.
+- Whisper uses greedy decoding, no prior take context, no realtime text callbacks, no temperature retries, and optional flash attention on CUDA. It performs a warm-up each time the model loads.
+- Unit tests cover cancellation/repeat/order, Win+H release order and preservation of other H shortcuts, audio length/gain and anti-aliasing, silence/cue rejection, bounded IPC, Unicode event pairs, normalization, configuration validation, quoted startup commands, the idle-unload rule, and the tray indicator.
+- The tray icon is drawn in code (anti-aliased 32-bit alpha, sized to the system small-icon metric) and updated only when the state changes.
 
 Verified on the development PC (2026-10-04): 24 unit tests, Clippy with warnings denied, CPU and CUDA release builds, identical reference-WAV transcripts on both backends, automatic CPU fallback with CUDA DLLs unavailable, and background startup/audio/shutdown using `scripts/smoke.ps1`. With base.en, the 11-second upstream `jfk.wav` sample took approximately **62 ms on an RTX 5090** and **547 ms on CPU** for warm inference. These timings exclude startup, capture, and text insertion and are not a universal latency guarantee. Cue playback queues complete cues in order, including when inference finishes before the stop cue ends. Recoverable WASAPI overruns do not trigger stream reconnect loops.
+
+Verified again (2026-10-11) after adding idle unload and the tray indicator: 29 unit tests, Clippy with warnings denied, CPU and CUDA release builds. With large-v3-turbo-q8_0 on an RTX 5090: `jfk.wav` transcribed correctly with 69 ms inference, a cold worker start plus transcription took about 1.1 s, an on-demand reload during a real dictation finished in 0.9 s, and the text was inserted 107 ms after key release.
 
 Physical key release behavior, perceived cue volume, microphone quality, and compatibility with your target editors require a desktop acceptance check. Passing automated tests does not prove a keyboard emits Pause releases.
 
