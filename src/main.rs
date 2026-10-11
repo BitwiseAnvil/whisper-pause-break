@@ -7,6 +7,7 @@ compile_error!("Whisper Pause/Break requires Windows 10/11 x64.");
 mod app;
 mod audio;
 mod config;
+mod icon;
 mod logging;
 mod platform;
 mod protocol;

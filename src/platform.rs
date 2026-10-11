@@ -2,6 +2,7 @@
 use crate::{
     app::{Event, Status},
     config::Hotkey,
+    icon::{self, Activity},
     shortcuts::{Decision, Modifiers, VoiceTypingBlocker},
     state::Input,
 };
@@ -42,6 +43,7 @@ struct Context {
     diagnostic: bool,
     started: Instant,
     taskbar_created: u32,
+    shown: Option<(String, Activity, bool)>,
 }
 thread_local! { static CONTEXT: RefCell<Option<Context>> = const { RefCell::new(None) }; }
 
@@ -157,7 +159,50 @@ fn mask_start_menu() {
     }
 }
 
-fn tray(hwnd: HWND, operation: u32, status: &str) {
+thread_local! { static ICONS: RefCell<Vec<(Activity, bool, HICON)>> = const { RefCell::new(Vec::new()) }; }
+
+/// Icons are created once per state on the UI thread and kept for the process lifetime.
+fn state_icon(activity: Activity, loaded: bool) -> HICON {
+    ICONS.with(|cell| {
+        let mut icons = cell.borrow_mut();
+        if let Some((_, _, icon)) = icons.iter().find(|(a, l, _)| *a == activity && *l == loaded) {
+            return *icon;
+        }
+        let icon = create_icon(activity, loaded).unwrap_or_else(|| unsafe { LoadIconW(null_mut(), IDI_APPLICATION) });
+        icons.push((activity, loaded, icon));
+        icon
+    })
+}
+
+fn create_icon(activity: Activity, loaded: bool) -> Option<HICON> {
+    use windows_sys::Win32::Graphics::Gdi::*;
+    unsafe {
+        let size = GetSystemMetrics(SM_CXSMICON).clamp(16, 64);
+        let mut info: BITMAPINFO = std::mem::zeroed();
+        info.bmiHeader.biSize = std::mem::size_of::<BITMAPINFOHEADER>() as u32;
+        info.bmiHeader.biWidth = size;
+        info.bmiHeader.biHeight = -size; // top-down rows
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        info.bmiHeader.biCompression = BI_RGB;
+        let mut bits = null_mut();
+        let color = CreateDIBSection(null_mut(), &info, DIB_RGB_COLORS, &mut bits, null_mut(), 0);
+        if color.is_null() || bits.is_null() {
+            return None;
+        }
+        let pixels = icon::pixels(size as usize, activity, loaded);
+        std::ptr::copy_nonoverlapping(pixels.as_ptr(), bits as *mut u8, pixels.len());
+        // With a 32-bit alpha bitmap the monochrome mask is ignored but still required.
+        let mask = CreateBitmap(size, size, 1, 1, null());
+        let icon_info = ICONINFO { fIcon: 1, xHotspot: 0, yHotspot: 0, hbmMask: mask, hbmColor: color };
+        let icon = CreateIconIndirect(&icon_info);
+        DeleteObject(color);
+        DeleteObject(mask);
+        (!icon.is_null()).then_some(icon)
+    }
+}
+
+fn tray(hwnd: HWND, operation: u32, status: &str, activity: Activity, loaded: bool) {
     unsafe {
         let mut data: NOTIFYICONDATAW = std::mem::zeroed();
         data.cbSize = std::mem::size_of_val(&data) as u32;
@@ -165,7 +210,7 @@ fn tray(hwnd: HWND, operation: u32, status: &str) {
         data.uID = 1;
         data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
         data.uCallbackMessage = TRAY_MESSAGE;
-        data.hIcon = LoadIconW(null_mut(), IDI_APPLICATION);
+        data.hIcon = state_icon(activity, loaded);
         let tip = wide(format!("Whisper Pause/Break — {status}"));
         for (dest, src) in data.szTip.iter_mut().take(127).zip(tip.iter()) {
             *dest = *src;
@@ -183,13 +228,17 @@ unsafe extern "system" fn window_proc(
     match message {
         WM_TIMER => {
             CONTEXT.with(|cell| {
-                if let Some(c) = cell.borrow().as_ref() {
+                if let Some(c) = cell.borrow_mut().as_mut() {
                     if c.diagnostic && c.started.elapsed().as_secs() >= 30 {
                         unsafe {
                             PostMessageW(hwnd, WM_CLOSE, 0, 0);
                         }
                     } else {
-                        tray(hwnd, NIM_MODIFY, &c.status.get());
+                        let now = (c.status.get(), c.status.2.get().0, c.status.2.get().1);
+                        if c.shown.as_ref() != Some(&now) {
+                            tray(hwnd, NIM_MODIFY, &now.0, now.1, now.2);
+                            c.shown = Some(now);
+                        }
                     }
                 }
             });
@@ -305,7 +354,7 @@ unsafe extern "system" fn window_proc(
             0
         }
         WM_DESTROY => {
-            tray(hwnd, NIM_DELETE, "");
+            tray(hwnd, NIM_DELETE, "", Activity::Idle, false);
             CONTEXT.with(|cell| {
                 if let Some(c) = cell.borrow().as_ref() {
                     c.status.allow_insertion(false);
@@ -320,10 +369,12 @@ unsafe extern "system" fn window_proc(
         }
         _ => {
             CONTEXT.with(|cell| {
-                if let Some(c) = cell.borrow().as_ref()
+                if let Some(c) = cell.borrow_mut().as_mut()
                     && message == c.taskbar_created
                 {
-                    tray(hwnd, NIM_ADD, &c.status.get());
+                    let (activity, loaded) = c.status.2.get();
+                    tray(hwnd, NIM_ADD, &c.status.get(), activity, loaded);
+                    c.shown = None;
                 }
             });
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
@@ -404,6 +455,7 @@ pub fn run(
                 diagnostic,
                 started: Instant::now(),
                 taskbar_created: RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
+                shown: None,
             });
         });
         let hwnd = CreateWindowExW(
@@ -429,9 +481,10 @@ pub fn run(
                 std::io::Error::last_os_error()
             );
         }
-        tray(hwnd, NIM_ADD, &status.get());
+        let (activity, loaded) = status.2.get();
+        tray(hwnd, NIM_ADD, &status.get(), activity, loaded);
         WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
-        SetTimer(hwnd, 1, 250, None);
+        SetTimer(hwnd, 1, 100, None);
         let mut message: MSG = std::mem::zeroed();
         loop {
             let result = GetMessageW(&mut message, null_mut(), 0, 0);

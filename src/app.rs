@@ -1,6 +1,7 @@
 use crate::{
     audio::{self, Cue, Cues, Recorder},
     config::Config,
+    icon::{Activity, Indicator},
     logging::Log,
     state::{Action, Input, State},
     typing,
@@ -63,12 +64,19 @@ fn should_unload(
 }
 
 #[derive(Clone)]
-pub struct Status(pub Arc<Mutex<String>>, pub Arc<AtomicBool>);
+pub struct Status(
+    pub Arc<Mutex<String>>,
+    pub Arc<AtomicBool>,
+    pub Arc<Indicator>,
+);
 impl Status {
     pub fn new() -> Self {
+        let indicator = Indicator::default();
+        indicator.set(Activity::Loading, false);
         Self(
             Arc::new(Mutex::new("Loading local model…".into())),
             Arc::new(AtomicBool::new(true)),
+            Arc::new(indicator),
         )
     }
     pub fn get(&self) -> String {
@@ -162,12 +170,27 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
     let mut loading = true;
     let mut last_used = Instant::now();
     let mut suspended = false;
+    let mut model_error = false;
     let mut suppress_result = false;
     let mut started = Instant::now();
     let mut released = Instant::now();
     let ticks = crossbeam_channel::tick(Duration::from_millis(200));
     let mut next_device_check = Instant::now();
     loop {
+        let activity = if suspended {
+            Activity::Paused
+        } else if state.recording {
+            Activity::Recording
+        } else if state.busy {
+            Activity::Transcribing
+        } else if loading {
+            Activity::Loading
+        } else if model_error || recorder.is_none() {
+            Activity::Error
+        } else {
+            Activity::Idle
+        };
+        status.2.set(activity, loaded);
         crossbeam_channel::select! {
             recv(events) -> event => match event {
                 Ok(Event::Quit) | Err(_) => {
@@ -246,7 +269,7 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
             },
             recv(done) -> event => match event {
                 Ok(WorkerEvent::Loaded { backend: name, ms }) => {
-                    backend = name; loaded = true; loading = false;
+                    backend = name; loaded = true; loading = false; model_error = false;
                     log.event(format!("Whisper model loaded in {ms} ms ({backend})"));
                     if !state.busy && !state.recording {
                         status.set(if recorder.is_some() { idle_status(&backend, loaded, loading) } else { "No default microphone · waiting".into() });
@@ -254,7 +277,7 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
                 }
                 Ok(WorkerEvent::LoadFailed(error)) => {
                     // Not permanent: the next press (or queued recording) tries to load again.
-                    loaded = false; loading = false;
+                    loaded = false; loading = false; model_error = true;
                     log.event(format!("Whisper model load failed: {error}"));
                     if !state.busy && !state.recording { status.set("Model failed to load · see app.log"); }
                 }
