@@ -273,6 +273,10 @@ impl Client {
             timeout,
         })
     }
+    /// False after a failed transcription left no worker process; the next call starts one.
+    pub fn is_loaded(&self) -> bool {
+        self.process.is_some()
+    }
     pub fn backend(&self) -> &'static str {
         if self.process.as_ref().is_some_and(|p| p.gpu) {
             "CUDA"

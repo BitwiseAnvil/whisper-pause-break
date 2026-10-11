@@ -24,10 +24,42 @@ pub enum Event {
     Resume,
     Quit,
 }
+/// Commands run strictly in order on the worker thread, so a transcription queued
+/// behind a load simply waits for the model instead of failing.
+enum Command {
+    Load,
+    Transcribe(Vec<f32>),
+    Unload,
+}
 enum WorkerEvent {
-    Ready(String),
-    Failed(String),
-    Done(Result<(String, u64)>, String),
+    Loaded {
+        backend: String,
+        ms: u128,
+    },
+    LoadFailed(String),
+    Unloaded,
+    Done {
+        result: Result<(String, u64)>,
+        backend: String,
+        loaded: bool,
+    },
+}
+
+/// The model is released only when nothing is recording, queued, or loading.
+fn should_unload(
+    idle_unload_seconds: u64,
+    loaded: bool,
+    loading: bool,
+    busy: bool,
+    recording: bool,
+    idle: Duration,
+) -> bool {
+    idle_unload_seconds > 0
+        && loaded
+        && !loading
+        && !busy
+        && !recording
+        && idle >= Duration::from_secs(idle_unload_seconds)
 }
 
 #[derive(Clone)]
@@ -51,30 +83,65 @@ impl Status {
 }
 
 pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, status: Status) {
-    let (requests, work) = crossbeam_channel::bounded::<Vec<f32>>(1);
+    let (commands, work) = crossbeam_channel::unbounded::<Command>();
     let (results, done) = crossbeam_channel::unbounded();
     let worker_dir = dir.clone();
     let worker_log = log.clone();
     let worker_config = config.clone();
     std::thread::spawn(move || {
-        let mut client = match Client::start(&worker_dir, &worker_config, &worker_log) {
-            Ok(client) => client,
-            Err(e) => {
-                let _ = results.send(WorkerEvent::Failed(format!("{e:#}")));
-                return;
+        let mut client: Option<Client> = None;
+        let load = |client: &mut Option<Client>| -> WorkerEvent {
+            let started = Instant::now();
+            match Client::start(&worker_dir, &worker_config, &worker_log) {
+                Ok(new_client) => {
+                    let backend = new_client.backend().into();
+                    *client = Some(new_client);
+                    WorkerEvent::Loaded {
+                        backend,
+                        ms: started.elapsed().as_millis(),
+                    }
+                }
+                Err(error) => WorkerEvent::LoadFailed(format!("{error:#}")),
             }
         };
-        let _ = results.send(WorkerEvent::Ready(client.backend().into()));
-        while let Ok(samples) = work.recv() {
-            let result = client.transcribe(&samples, &worker_dir, &worker_log);
-            if results
-                .send(WorkerEvent::Done(result, client.backend().into()))
-                .is_err()
-            {
+        while let Ok(command) = work.recv() {
+            let event = match command {
+                Command::Load if client.is_some() => continue,
+                Command::Load => load(&mut client),
+                Command::Unload => match client.take() {
+                    // Dropping the client kills the worker process, which frees all of its GPU memory.
+                    Some(_) => WorkerEvent::Unloaded,
+                    None => continue,
+                },
+                Command::Transcribe(samples) => {
+                    let mut load_error = None;
+                    if client.is_none() {
+                        match load(&mut client) {
+                            WorkerEvent::LoadFailed(error) => load_error = Some(error),
+                            loaded_event => {
+                                if results.send(loaded_event).is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    match client.as_mut() {
+                        Some(client) => transcribe(client, &samples, &worker_dir, &worker_log),
+                        None => WorkerEvent::Done {
+                            result: Err(anyhow::anyhow!(load_error.unwrap_or_default())),
+                            backend: String::new(),
+                            loaded: false,
+                        },
+                    }
+                }
+            };
+            if results.send(event).is_err() {
                 break;
             }
         }
     });
+    // Load at startup to surface configuration errors early; idle unload releases it later.
+    let _ = commands.send(Command::Load);
     let mut recorder = match Recorder::open(&config, &log) {
         Ok(recorder) => Some(recorder),
         Err(error) => {
@@ -89,12 +156,11 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
             None
         }
     };
-    let mut state = State {
-        busy: true,
-        ..State::default()
-    };
+    let mut state = State::default();
     let mut backend = String::new();
-    let mut ready = false;
+    let mut loaded = false;
+    let mut loading = true;
+    let mut last_used = Instant::now();
     let mut suspended = false;
     let mut suppress_result = false;
     let mut started = Instant::now();
@@ -116,13 +182,17 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
                 }
                 Ok(Event::Resume) => {
                     suspended = false;
-                    if ready && !state.busy { status.set(format!("Ready · {backend}")); }
+                    if !state.busy { status.set(idle_status(&backend, loaded, loading)); }
                 }
                 Ok(Event::Key(input)) => {
                     if suspended { continue; }
                     match state.input(input) {
                         Action::Start => {
-                            if !ready { state.input(Input::Cancel); continue; }
+                            last_used = Instant::now();
+                            // Load in parallel with recording; the microphone stream is already open.
+                            if !loaded && !loading {
+                                loading = commands.send(Command::Load).is_ok();
+                            }
                             let result = recorder.as_ref().ok_or_else(|| anyhow::anyhow!("No microphone available"))
                                 .and_then(|r| r.start());
                             if let Err(error) = result {
@@ -131,7 +201,7 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
                             }
                             started = Instant::now();
                             if let Some(cues) = &cues { cues.play(Cue::Start); }
-                            status.set("Recording · Escape cancels");
+                            status.set(if loaded { "Recording · Escape cancels" } else { "Recording · loading model · Escape cancels" });
                         }
                         Action::Discard => {
                             if let Some(recorder) = &recorder { recorder.discard(); }
@@ -141,19 +211,24 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
                         }
                         Action::Submit => {
                             released = Instant::now();
+                            last_used = released;
                             let recording = recorder.as_ref().unwrap();
                             let captured = recording.stop();
                             if let Some(cues) = &cues { cues.play(Cue::Stop); }
                             match captured.and_then(|samples| audio::prepare(&samples, recording.rate, &config)) {
                                 Ok(Some(samples)) => {
                                     suppress_result = false;
-                                    if requests.try_send(samples).is_err() {
-                                        state.complete(); ready = false;
+                                    if commands.send(Command::Transcribe(samples)).is_err() {
+                                        state.complete();
                                         status.set("Whisper unavailable · restart the app");
-                                    } else { status.set(format!("Transcribing · {backend}")); }
+                                    } else if loaded {
+                                        status.set(format!("Transcribing · {backend}"));
+                                    } else {
+                                        status.set("Transcribing · loading model");
+                                    }
                                 }
                                 Ok(None) => {
-                                    state.complete(); status.set(format!("Ready · {backend} · no speech detected"));
+                                    state.complete(); status.set(format!("{} · no speech detected", idle_status(&backend, loaded, loading)));
                                     log.event("Empty, very short, or quiet recording discarded");
                                 }
                                 Err(error) => {
@@ -164,23 +239,33 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
                         }
                         Action::None => {
                             if input == Input::Down && state.busy { status.set("Busy · wait for completion before recording"); }
-                            if input == Input::Up && !state.busy && ready { status.set(format!("Ready · {backend}")); }
+                            if input == Input::Up && !state.busy { status.set(idle_status(&backend, loaded, loading)); }
                         }
                     }
                 }
             },
             recv(done) -> event => match event {
-                Ok(WorkerEvent::Ready(name)) => {
-                    backend = name; ready = true; state.complete();
-                    status.set(if recorder.is_some() { format!("Ready · {backend}") } else { "No default microphone · waiting".into() });
+                Ok(WorkerEvent::Loaded { backend: name, ms }) => {
+                    backend = name; loaded = true; loading = false;
+                    log.event(format!("Whisper model loaded in {ms} ms ({backend})"));
+                    if !state.busy && !state.recording {
+                        status.set(if recorder.is_some() { idle_status(&backend, loaded, loading) } else { "No default microphone · waiting".into() });
+                    }
                 }
-                Ok(WorkerEvent::Failed(error)) => {
-                    ready = false; state.busy = true;
-                    status.set("Model unavailable · see app.log and restart");
-                    log.event(format!("Whisper startup failed: {error}"));
+                Ok(WorkerEvent::LoadFailed(error)) => {
+                    // Not permanent: the next press (or queued recording) tries to load again.
+                    loaded = false; loading = false;
+                    log.event(format!("Whisper model load failed: {error}"));
+                    if !state.busy && !state.recording { status.set("Model failed to load · see app.log"); }
                 }
-                Ok(WorkerEvent::Done(result, name)) => {
-                    backend = name;
+                Ok(WorkerEvent::Unloaded) => {
+                    log.event(format!("Whisper model unloaded after {} s idle; GPU memory released", config.idle_unload_seconds));
+                    if !state.busy && !state.recording { status.set(idle_status(&backend, loaded, loading)); }
+                }
+                Ok(WorkerEvent::Done { result, backend: name, loaded: still_loaded }) => {
+                    if !name.is_empty() { backend = name; }
+                    loaded = still_loaded; loading = false;
+                    last_used = Instant::now();
                     state.complete();
                     if suppress_result || suspended {
                         log.event("Pending transcription discarded after session lock/suspend");
@@ -193,12 +278,12 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
                                 Ok(()) => {
                                     if let Some(cues) = &cues { cues.play(Cue::Complete); }
                                     log.event(format!("Inserted {} characters; inference {inference_ms} ms; release-to-insertion {} ms; {backend}", text.chars().count(), released.elapsed().as_millis()));
-                                    status.set(format!("Ready · {backend}"));
+                                    status.set(idle_status(&backend, loaded, loading));
                                 }
                                 Err(error) => { status.set("Text insertion failed · see app.log"); log.event(format!("Insertion failed: {error:#}")); }
                             }
                         }
-                        Ok(_) => { status.set(format!("Ready · {backend} · no speech detected")); }
+                        Ok(_) => { status.set(format!("{} · no speech detected", idle_status(&backend, loaded, loading))); }
                         Err(error) => { status.set("Transcription failed · see app.log"); log.event(format!("Transcription failed: {error:#}")); }
                     }
                 }
@@ -209,6 +294,11 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
                 }
             },
             recv(ticks) -> _ => {
+                if should_unload(config.idle_unload_seconds, loaded, loading, state.busy, state.recording, last_used.elapsed())
+                    && commands.send(Command::Unload).is_ok()
+                {
+                    loaded = false;
+                }
                 if state.recording && (started.elapsed().as_secs() >= config.max_recording_seconds as u64 || recorder.as_ref().is_some_and(Recorder::failed)) {
                     state.input(Input::Cancel);
                     if let Some(recorder) = &recorder { recorder.discard(); }
@@ -234,6 +324,64 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
     }
 }
 
+fn transcribe(
+    client: &mut Client,
+    samples: &[f32],
+    dir: &std::path::Path,
+    log: &Log,
+) -> WorkerEvent {
+    let result = client.transcribe(samples, dir, log);
+    WorkerEvent::Done {
+        result,
+        backend: client.backend().into(),
+        loaded: client.is_loaded(),
+    }
+}
+
+fn idle_status(backend: &str, loaded: bool, loading: bool) -> String {
+    if loading {
+        "Loading model · you can start speaking".into()
+    } else if loaded {
+        format!("Ready · {backend}")
+    } else {
+        "Ready · model unloaded, loads when you press".into()
+    }
+}
+
 pub fn send(tx: &Sender<Event>, event: Event) {
     let _ = tx.send(event);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    const IDLE: Duration = Duration::from_secs(120);
+    #[test]
+    fn unloads_only_when_fully_idle() {
+        assert!(should_unload(60, true, false, false, false, IDLE));
+        assert!(
+            !should_unload(0, true, false, false, false, IDLE),
+            "0 keeps the model loaded"
+        );
+        assert!(
+            !should_unload(60, false, false, false, false, IDLE),
+            "nothing to unload"
+        );
+        assert!(
+            !should_unload(60, true, true, false, false, IDLE),
+            "never while loading"
+        );
+        assert!(
+            !should_unload(60, true, false, true, false, IDLE),
+            "never with a queued transcription"
+        );
+        assert!(
+            !should_unload(60, true, false, false, true, IDLE),
+            "never while recording"
+        );
+        assert!(
+            !should_unload(600, true, false, false, false, IDLE),
+            "not before the timeout"
+        );
+    }
 }

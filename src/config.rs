@@ -20,6 +20,9 @@ pub struct Config {
     pub inference_timeout_seconds: u64,
     /// Swallow Win+H so Windows voice typing cannot open while the app runs.
     pub block_win_h: bool,
+    /// Release the model (and its GPU memory) after this many idle seconds; 0 keeps it loaded.
+    /// Pressing the hotkey reloads it while you speak, so recording never waits for the model.
+    pub idle_unload_seconds: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -84,6 +87,7 @@ impl Default for Config {
             cue_volume: 0.10,
             inference_timeout_seconds: 180,
             block_win_h: false,
+            idle_unload_seconds: 0,
         }
     }
 }
@@ -130,6 +134,10 @@ impl Config {
         ensure!(
             self.language == "auto" || whisper_rs::get_lang_id(&self.language).is_some(),
             "Unknown Whisper language"
+        );
+        ensure!(
+            self.idle_unload_seconds == 0 || (10..=86_400).contains(&self.idle_unload_seconds),
+            "idle_unload_seconds must be 0 (never) or 10..86400"
         );
         ensure!(
             !self.model.as_os_str().is_empty(),
@@ -185,6 +193,14 @@ mod tests {
         assert!(c.validate().is_err());
         c.max_recording_seconds = 120;
         c.cue_volume = f32::NAN;
+        assert!(c.validate().is_err());
+    }
+    #[test]
+    fn idle_unload_is_opt_in_and_bounded() {
+        assert_eq!(Config::default().idle_unload_seconds, 0);
+        let c: Config = toml::from_str("idle_unload_seconds = 60").unwrap();
+        assert!(c.validate().is_ok());
+        let c: Config = toml::from_str("idle_unload_seconds = 5").unwrap();
         assert!(c.validate().is_err());
     }
     #[test]
