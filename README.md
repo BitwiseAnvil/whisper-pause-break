@@ -143,7 +143,7 @@ Already have an appropriate GGML Whisper model? Use `install --model C:\path\ggm
 
 For a larger CUDA model, [large-v3-turbo](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-large-v3-turbo.bin) has 809 million parameters and a 1.62 GB GGML file. Install a downloaded copy with `install --model C:\path\ggml-large-v3-turbo.bin`; keep `language = "en"` for English dictation. It uses more GPU memory than base.en. The verified SHA-256 for this file is `1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69`. The 8-bit [large-v3-turbo-q8_0](https://huggingface.co/ggerganov/whisper.cpp/blob/main/ggml-large-v3-turbo-q8_0.bin) (874 MB, SHA-256 `317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1`) needs about half the GPU memory (874 MB versus 1.62 GB of model weights on CUDA) and transcribed the reference sample identically. The download and model switch happen once; all subsequent transcription remains local.
 
-A good setup for a shared GPU is the q8_0 model with `idle_unload_seconds = 30`: after 30 idle seconds the worker process exits and releases all of its GPU memory, and the next press reloads it while you are still speaking.
+A good setup for a shared GPU is the q8_0 model with `idle_unload_seconds = 15`: after 15 idle seconds the worker process exits and releases all of its GPU memory, and the next press reloads it while you are still speaking.
 
 `install --no-start` enables startup without launching immediately. To run portably, use `--data-dir C:\path\data run`; the same global option applies to all commands. Installation and the one-time model download are explicit, never performed during background startup.
 
