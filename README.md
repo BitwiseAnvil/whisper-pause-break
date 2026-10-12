@@ -2,7 +2,7 @@
 
 **Hold a key, talk, let go, and your words appear.** Whisper Pause/Break is
 push-to-talk dictation for Windows. Hold **Pause/Break**, speak, and release:
-Whisper transcribes on your own PC and types the text at your cursor, in any
+Whisper transcribes on your own PC and pastes the text at your cursor, in any
 app. Nothing is sent to the cloud, and nothing is recorded unless you're holding
 the key, so the people around you can talk freely.
 
@@ -20,9 +20,13 @@ conversations with your AI coding tools.
 - **Fast and local.** With the default `base.en` model, an 11-second clip
   transcribes in about **62 ms on an RTX 5090** and about half a second on CPU.
   Without a usable NVIDIA GPU it falls back to the CPU automatically.
-- **Types anywhere.** Text goes in through standard Windows input at the cursor
-  of whatever app is focused, with a trailing space so consecutive takes don't
-  run together. It never presses Enter or Tab, and never touches your clipboard.
+- **Works anywhere.** Text is pasted at the cursor of whatever app is focused,
+  with a trailing space so consecutive takes don't run together, and stays on
+  the clipboard so you can paste it again. It never presses Enter or Tab.
+  Prefer keystrokes that leave the clipboard alone? Set `output_mode = "type"`.
+- **Never lose a take.** Dictated for a minute but the cursor wasn't in a text
+  box? The transcript is still on the clipboard: click where it belongs and
+  press **Ctrl+V**.
 - **Changed your mind?** Press **Escape** while still holding the key to throw
   the take away.
 - **Audible cues.** Short ticks confirm start, stop, insertion and cancel, so
@@ -153,18 +157,20 @@ A good setup for a shared GPU is the q8_0 model with `idle_unload_seconds = 15`:
 | --- | --- | --- |
 | Press and hold Pause | Start capturing the default microphone | 35 ms rising tick |
 | Release Pause | Stop capture and transcribe the whole take | 45 ms falling tick |
-| Finished text accepted by Windows input | Type the entire transcript at the current cursor | 80 ms double tick |
+| Finished text accepted by Windows input | Paste (or type) the entire transcript at the current cursor | 80 ms double tick |
 | Escape while held | Discard the take; release before starting again | 85 ms low falling double tick |
 
 The hotkey and cancellation Escape are consumed so they do not act on the focused application. Escape plays the cancellation cue once when it discards an active recording; subsequent Escape presses and releasing Pause do not play another cue or submit audio. Ordinary Escape passes through silently. Key-repeat cannot restart a cancelled recording. A second press while transcribing is ignored; wait for completion before the next take. No audio is queued for later insertion. Silence, very short taps, disconnected microphones, and recordings over the configured duration are discarded. Locking/suspending Windows discards active capture and suppresses pending results.
 
 **Optional: block Win+H.** Off by default. Set `block_win_h = true` in `config.toml` and restart to stop Windows voice typing from opening with Win+H while the app runs. When enabled, either Windows key works; held H repeats and its release are consumed. Plain H, other Windows shortcuts, and H shortcuts with extra Ctrl/Alt/Shift modifiers pass through. Quitting the app restores Win+H automatically. No Windows setting or separate remapping utility is required; diagnostic CLI commands do not enable the block.
 
+**Paste or type.** `output_mode = "paste"` (the default) puts the transcript, with its trailing space, on the clipboard and presses Ctrl+V in the focused window as soon as transcription finishes. A long paste is as fast as a short one, and apps that mishandle synthetic Unicode keystrokes still receive the exact text. **The previous clipboard contents are not saved or restored:** the transcript replaces them and stays on the clipboard, like an ordinary copy, until something else is copied, so you can paste the last take again. That also rescues a take that landed nowhere because no text field had focus: click into the right field and press Ctrl+V. Like any copy it can appear in Win+V clipboard history and clipboard managers. If another app holds the clipboard for about 200 ms, the take is typed instead and `app.log` says why. Held Ctrl, Alt, Shift or Windows keys are waited out (up to 2 seconds) before Ctrl+V is sent, and the app's keyboard hook ignores its own injected keys. `output_mode = "type"` sends the text as Unicode keystrokes instead and never touches the clipboard; use it for apps where Ctrl+V means something else (for example Vim's block selection) or to keep your clipboard. Edit `config.toml` and restart to switch.
+
 The tray icon is a dot whose color shows activity: green while listening (hotkey held), blue while transcribing, amber while the model loads, gray when idle, purple on a model or microphone error, and dark gray while Windows is locked. A filled dot means the model is loaded; a hollow ring means it is unloaded and will reload on the next press. Right/left-click the tray icon to see status, open configuration/logs, or quit. Only one instance can run in a Windows session. Configuration changes require a restart. Audio is kept in memory only; neither audio nor transcript contents are written to logs. The microphone stream stays open to minimize press latency, but samples outside an active recording are discarded immediately. Windows' microphone indicator may therefore stay on while idle.
 
 The default microphone is checked every two seconds while idle and rebuilt after a device change/failure. Use headphones to prevent the short start cue from entering a sensitive microphone. A simple energy gate rejects silence and isolated clicks; Whisper can still make recognition mistakes, especially in noise.
 
-Text is sent through `SendInput` using UTF-16 (including surrogate pairs). Control characters/newlines are normalized to spaces so dictation cannot press Enter or Tab. A trailing space is appended after each take so consecutive dictations do not run together. The completion cue follows successful submission of **all** input events to Windows; arbitrary applications do not expose a universal acknowledgement that they displayed the text. Most standard text fields work. Elevated applications can block a normal user's synthetic input through Windows UIPI, and some games, terminals, or custom editors may reject Unicode input. Insertion is not retried after partial failure because that could duplicate text. Secure desktops/UAC prompts are outside the supported interaction.
+In type mode, text is sent through `SendInput` using UTF-16 (including surrogate pairs). Control characters/newlines are normalized to spaces so dictation cannot press Enter or Tab. A trailing space is appended after each take so consecutive dictations do not run together. The completion cue follows successful submission of **all** input events to Windows; arbitrary applications do not expose a universal acknowledgement that they displayed the text. Most standard text fields work. Elevated applications can block a normal user's synthetic input through Windows UIPI, and some games, terminals, or custom editors may reject Unicode input. Insertion (typed or pasted) is not retried after partial failure because that could duplicate text. Secure desktops/UAC prompts are outside the supported interaction.
 
 ## Diagnostics
 
@@ -190,7 +196,7 @@ Windows GUI executables do not always make PowerShell wait. To synchronously wai
 - A local anonymous pipe carries bounded PCM frames to one Whisper worker process. It stays loaded, or with `idle_unload_seconds` it exits when idle and is restarted on the next press. Load, transcribe and unload requests run strictly in order, so a take recorded during a reload waits for the model instead of failing, and the model is never unloaded while recording, loading or transcribing. A failed load is retried on the next press rather than requiring a restart. JSON responses are length-delimited and bounded. No network sockets or temporary WAV files are used.
 - A Windows job object kills the child when the host exits. CUDA initialization failures, native aborts, disconnects, and inference timeouts trigger CPU fallback. Failed GPU inference is retried once on CPU, before any text is inserted. With idle unload enabled, each reload tries CUDA again, so a transient GPU fault does not leave the app on CPU until restart.
 - Whisper uses greedy decoding, no prior take context, no realtime text callbacks, no temperature retries, and optional flash attention on CUDA. It performs a warm-up each time the model loads.
-- Unit tests cover cancellation/repeat/order, Win+H release order and preservation of other H shortcuts, audio length/gain and anti-aliasing, silence/cue rejection, bounded IPC, Unicode event pairs, normalization, configuration validation, quoted startup commands, the idle-unload rule, and the tray indicator.
+- Unit tests cover cancellation/repeat/order, Win+H release order and preservation of other H shortcuts, audio length/gain and anti-aliasing, silence/cue rejection, bounded IPC, Unicode event pairs, the Ctrl+V sequence, clipboard text encoding, normalization, configuration validation, quoted startup commands, the idle-unload rule, and the tray indicator.
 - The tray icon is drawn in code (anti-aliased 32-bit alpha, sized to the system small-icon metric) and updated only when the state changes.
 
 Verified on the development PC (2026-10-04): 24 unit tests, Clippy with warnings denied, CPU and CUDA release builds, identical reference-WAV transcripts on both backends, automatic CPU fallback with CUDA DLLs unavailable, and background startup/audio/shutdown using `scripts/smoke.ps1`. With base.en, the 11-second upstream `jfk.wav` sample took approximately **62 ms on an RTX 5090** and **547 ms on CPU** for warm inference. These timings exclude startup, capture, and text insertion and are not a universal latency guarantee. Cue playback queues complete cues in order, including when inference finishes before the stop cue ends. Recoverable WASAPI overruns do not trigger stream reconnect loops.

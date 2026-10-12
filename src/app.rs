@@ -297,10 +297,10 @@ pub fn control(config: Config, dir: PathBuf, log: Log, events: Receiver<Event>, 
                     match result {
                         Ok((text, inference_ms)) if !text.is_empty() => {
                             // Trailing space keeps consecutive takes from running together.
-                            match typing::insert(&format!("{text} "), &status.1) {
-                                Ok(()) => {
+                            match typing::insert(&format!("{text} "), config.output_mode, &status.1) {
+                                Ok(method) => {
                                     if let Some(cues) = &cues { cues.play(Cue::Complete); }
-                                    log.event(format!("Inserted {} characters; inference {inference_ms} ms; release-to-insertion {} ms; {backend}", text.chars().count(), released.elapsed().as_millis()));
+                                    log.event(format!("Inserted {} characters ({method}); inference {inference_ms} ms; release-to-insertion {} ms; {backend}", text.chars().count(), released.elapsed().as_millis()));
                                     status.set(idle_status(&backend, loaded, loading));
                                 }
                                 Err(error) => { status.set("Text insertion failed · see app.log"); log.event(format!("Insertion failed: {error:#}")); }

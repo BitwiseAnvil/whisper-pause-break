@@ -23,6 +23,18 @@ pub struct Config {
     /// Release the model (and its GPU memory) after this many idle seconds; 0 keeps it loaded.
     /// Pressing the hotkey reloads it while you speak, so recording never waits for the model.
     pub idle_unload_seconds: u64,
+    /// How the transcript is inserted; see [`OutputMode`].
+    pub output_mode: OutputMode,
+}
+
+/// Paste leaves the transcript on the clipboard after Ctrl+V; type sends Unicode
+/// keystrokes and never touches the clipboard.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum OutputMode {
+    #[default]
+    Paste,
+    Type,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -88,6 +100,7 @@ impl Default for Config {
             inference_timeout_seconds: 180,
             block_win_h: false,
             idle_unload_seconds: 0,
+            output_mode: OutputMode::Paste,
         }
     }
 }
@@ -202,6 +215,17 @@ mod tests {
         assert!(c.validate().is_ok());
         let c: Config = toml::from_str("idle_unload_seconds = 5").unwrap();
         assert!(c.validate().is_err());
+    }
+    #[test]
+    fn output_mode_defaults_to_paste() {
+        assert_eq!(Config::default().output_mode, OutputMode::Paste);
+        let c: Config = toml::from_str("output_mode = \"type\"").unwrap();
+        assert_eq!(c.output_mode, OutputMode::Type);
+        let c: Config = toml::from_str("output_mode = \"paste\"").unwrap();
+        assert_eq!(c.output_mode, OutputMode::Paste);
+        assert!(toml::from_str::<Config>("output_mode = \"clipboard\"").is_err());
+        let saved = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(saved.contains("output_mode = \"paste\""));
     }
     #[test]
     fn unknown_options_are_errors() {
